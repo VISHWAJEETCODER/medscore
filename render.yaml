@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: medscore-backend
+    runtime: node
+    region: singapore
+    plan: free
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
