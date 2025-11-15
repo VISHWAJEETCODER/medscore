@@ -47,7 +47,11 @@ app.use("/api/", apiLimiter);
 console.log("✅ Using basic rate limiting for API protection");
 
 // Trust proxy (for accurate IP addresses behind reverse proxy)
+// Trust proxy (critical for accurate client IP addresses behind Render/CloudFlare)
 app.set("trust proxy", 1);
+
+// Enable pre-flight CORS requests for all routes
+app.options("*", cors());
 
 // Add session middleware
 const sessionConfig = {
@@ -92,19 +96,34 @@ app.use(
 
 // CORS - Cross-Origin Resource Sharing
 const corsOptions = {
-  origin: [
-    "https://medscore.xyz",
-    "https://www.medscore.xyz",
-    "https://api.medscore.xyz",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:5000",
-    "http://127.0.0.1:5000",
-    process.env.FRONTEND_URL,
-    ...(process.env.ALLOWED_ORIGINS
-      ? process.env.ALLOWED_ORIGINS.split(",")
-      : []),
-  ].filter(Boolean),
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, curl requests)
+    if (!origin) return callback(null, true);
+
+    // Check against allowed origins
+    const allowedOrigins = [
+      "https://medscore.xyz",
+      "https://www.medscore.xyz",
+      "https://api.medscore.xyz",
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+      "http://localhost:5000",
+      "http://127.0.0.1:5000",
+      process.env.FRONTEND_URL,
+      ...(process.env.ALLOWED_ORIGINS
+        ? process.env.ALLOWED_ORIGINS.split(",")
+        : []),
+    ].filter(Boolean);
+
+    if (
+      allowedOrigins.indexOf(origin) !== -1 ||
+      process.env.NODE_ENV === "development"
+    ) {
+      callback(null, true);
+    } else {
+      callback(new Error(`Origin ${origin} not allowed by CORS`));
+    }
+  },
   credentials: true,
   optionsSuccessStatus: 200,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
@@ -113,14 +132,31 @@ const corsOptions = {
     "Authorization",
     "X-API-Key",
     "X-Requested-With",
+    "Origin",
+    "Accept",
   ],
   exposedHeaders: ["Authorization"],
+  maxAge: 86400, // 24 hours
 };
 
 app.use(cors(corsOptions));
 
 // Handle preflight requests explicitly
+// Explicit CORS preflight handling for all routes
 app.options("*", cors(corsOptions));
+
+// Log CORS errors
+app.use((err, req, res, next) => {
+  if (err.message.includes("CORS")) {
+    console.error(`❌ CORS Error: ${err.message}`);
+    return res.status(403).json({
+      error: "CORS error",
+      message: err.message,
+      origin: req.headers.origin,
+    });
+  }
+  next(err);
+});
 
 // Body parser middleware
 app.use(express.json({ limit: "10mb" }));
@@ -315,14 +351,34 @@ app.get("/keep-alive", (req, res) => {
   });
 });
 
-// Internal keep-alive mechanism - Ping self every 10 minutes to prevent Render sleep
+// Internal keep-alive mechanism - Ping self more frequently to prevent Render sleep
 const startKeepAlive = () => {
-  const keepAliveInterval = 10 * 60 * 1000; // 10 minutes
-  const baseURL = process.env.BACKEND_URL || "https://medscore-backend.onrender.com";
-  
+  const keepAliveInterval = 5 * 60 * 1000; // 5 minutes (increased frequency)
+  const baseURL =
+    process.env.BACKEND_URL || "https://medscore-backend.onrender.com";
+
+  // Initial ping immediately on startup
+  setTimeout(async () => {
+    try {
+      const response = await axios.get(`${baseURL}/keep-alive`, {
+        timeout: 5000,
+        headers: { "User-Agent": "MedScore-KeepAlive/1.0" },
+      });
+      if (response.status === 200) {
+        console.log("✅ Initial keep-alive ping successful - Render activated");
+      }
+    } catch (error) {
+      console.warn("⚠️ Initial keep-alive ping error:", error.message);
+    }
+  }, 5000); // Wait 5 seconds after startup
+
+  // Regular interval pings
   setInterval(async () => {
     try {
-      const response = await axios.get(`${baseURL}/keep-alive`, { timeout: 5000 });
+      const response = await axios.get(`${baseURL}/keep-alive`, {
+        timeout: 5000,
+        headers: { "User-Agent": "MedScore-KeepAlive/1.0" },
+      });
       if (response.status === 200) {
         console.log("✅ Keep-alive ping successful - Render will not sleep");
       } else {
@@ -332,8 +388,10 @@ const startKeepAlive = () => {
       console.warn("⚠️ Keep-alive ping error:", error.message);
     }
   }, keepAliveInterval);
-  
-  console.log("✅ Render keep-alive mechanism started (pings every 10 minutes)");
+
+  console.log(
+    `✅ Render keep-alive mechanism started (pings every ${keepAliveInterval / 60000} minutes)`,
+  );
 };
 
 // Start keep-alive only in production (Render)
@@ -356,18 +414,40 @@ app.use(express.static(path.join(__dirname, "../frontend")));
 app.use((req, res, next) => {
   // List of valid frontend routes that should be served
   const validRoutes = [
-    '/', '/login', '/signup', '/forgot-password',
-    '/dashboard', '/mentor-dashboard',
-    '/colleges', '/mentors', '/materials', '/planner', '/bookings', '/settings', '/apply-mentor',
-    '/admin', '/admin/login', '/admin/dashboard', '/admin/uploads',
-    '/admin/colleges', '/admin/mentors', '/admin/materials', '/admin/users', '/admin/settings'
+    "/",
+    "/login",
+    "/signup",
+    "/forgot-password",
+    "/dashboard",
+    "/mentor-dashboard",
+    "/colleges",
+    "/mentors",
+    "/materials",
+    "/planner",
+    "/bookings",
+    "/settings",
+    "/apply-mentor",
+    "/admin",
+    "/admin/login",
+    "/admin/dashboard",
+    "/admin/uploads",
+    "/admin/colleges",
+    "/admin/mentors",
+    "/admin/materials",
+    "/admin/users",
+    "/admin/settings",
   ];
-  
+
   // Check if it's a valid route or a static asset
   const isApiRoute = req.path.startsWith("/api/");
-  const isStaticAsset = req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|html)$/i);
-  const isValidRoute = validRoutes.includes(req.path) || req.path.startsWith('/frontend/') || req.path.startsWith('/assets/');
-  
+  const isStaticAsset = req.path.match(
+    /\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|html)$/i,
+  );
+  const isValidRoute =
+    validRoutes.includes(req.path) ||
+    req.path.startsWith("/frontend/") ||
+    req.path.startsWith("/assets/");
+
   // If it's an API route, return JSON error
   if (isApiRoute) {
     return res.status(404).json({
@@ -378,7 +458,7 @@ app.use((req, res, next) => {
       documentation: "https://api.medscore.xyz/api/health",
     });
   }
-  
+
   // If it's a static asset or valid route, it should have been served already
   // If we reach here, it's an invalid route
   // For all invalid routes (like /backend, /cursormkc, etc.), show HTML error page
